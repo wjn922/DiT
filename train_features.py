@@ -13,7 +13,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision.datasets import ImageFolder
 from torchvision import transforms
@@ -103,6 +103,28 @@ def center_crop_arr(pil_image, image_size):
     return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
 
 
+class CustomDataset(Dataset):
+    def __init__(self, features_dir, labels_dir):
+        self.features_dir = features_dir
+        self.labels_dir = labels_dir
+
+        self.features_files = sorted(os.listdir(features_dir))
+        self.labels_files = sorted(os.listdir(labels_dir))
+
+    def __len__(self):
+        assert len(self.features_files) == len(self.labels_files), \
+            "Number of feature files and label files should be same"
+        return len(self.features_files)
+
+    def __getitem__(self, idx):
+        feature_file = self.features_files[idx]
+        label_file = self.labels_files[idx]
+
+        features = np.load(os.path.join(self.features_dir, feature_file))
+        labels = np.load(os.path.join(self.labels_dir, label_file))
+        return torch.from_numpy(features), torch.from_numpy(labels)
+
+
 #################################################################################
 #                                  Training Loop                                #
 #################################################################################
@@ -156,13 +178,9 @@ def main(args):
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
 
     # Setup data:
-    transform = transforms.Compose([
-        transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.image_size)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
-    ])
-    dataset = ImageFolder(args.data_path, transform=transform)
+    features_dir = f"{args.feature_path}/imagenet256_features"
+    labels_dir = f"{args.feature_path}/imagenet256_labels"
+    dataset = CustomDataset(features_dir, labels_dir)
     sampler = DistributedSampler(
         dataset,
         num_replicas=dist.get_world_size(),
@@ -179,7 +197,7 @@ def main(args):
         pin_memory=True,
         drop_last=True
     )
-    logger.info(f"Dataset contains {len(dataset):,} images ({args.data_path})")
+    logger.info(f"Dataset contains {len(dataset):,} images ({args.feature_path})")
 
     # Prepare models for training:
     update_ema(ema, model.module, decay=0)  # Ensure EMA is initialized with synced weights
@@ -199,9 +217,8 @@ def main(args):
         for x, y in loader:
             x = x.to(device)
             y = y.to(device)
-            with torch.no_grad():
-                # Map input images to latent space + normalize latents:
-                x = vae.encode(x).latent_dist.sample().mul_(0.18215)
+            x = x.squeeze(dim=1)
+            y = y.squeeze(dim=1)
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
             model_kwargs = dict(y=y)
             loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
@@ -254,7 +271,7 @@ def main(args):
 if __name__ == "__main__":
     # Default args here will train DiT-XL/2 with the hyperparameters we used in our paper (except training iters).
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-path", type=str, required=True)
+    parser.add_argument("--feature-path", type=str, required=True)
     parser.add_argument("--results-dir", type=str, default="results")
     parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-XL/2")
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)

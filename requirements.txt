@@ -1,0 +1,5 @@
+timm==0.9.10
+diffusers==0.23.0
+accelerate==0.24.1
+transformers==4.35.0
+flash-attn==2.3.3
