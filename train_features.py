@@ -171,7 +171,7 @@ def main(args):
     # Note that parameter initialization is done within the DiT constructor
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
     requires_grad(ema, False)
-    model = DDP(model.to(device), device_ids=[rank])
+    model = DDP(model.to(device), device_ids=[args.gpu])
     # model = torch.compile(model, mode='max-autotune')
     diffusion = create_diffusion(timestep_respacing="")  # default: 1000 steps, linear noise schedule
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
