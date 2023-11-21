@@ -148,6 +148,13 @@ def main(args):
     torch.cuda.set_device(device)
     print(f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
 
+    # Variables for monitoring/logging purposes:
+    start_epoch = 0
+    train_steps = 0
+    log_steps = 0
+    running_loss = 0
+    start_time = time()
+
     # Setup an experiment folder:
     if rank == 0:
         os.makedirs(args.results_dir, exist_ok=True)  # Make results folder (holds all experiment subfolders)
@@ -172,6 +179,7 @@ def main(args):
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
     requires_grad(ema, False)
     model = DDP(model.to(device), device_ids=[args.gpu])
+    model_without_ddp = model.module
     # model = torch.compile(model, mode='max-autotune')
     diffusion = create_diffusion(timestep_respacing="")  # default: 1000 steps, linear noise schedule
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
@@ -203,18 +211,24 @@ def main(args):
     logger.info(f"Dataset contains {len(dataset):,} images ({args.feature_path})")
 
     # Prepare models for training:
-    update_ema(ema, model.module, decay=0)  # Ensure EMA is initialized with synced weights
+    if args.ckpt:
+        checkpoint = torch.load(args.ckpt, map_location="cpu")
+        model_without_ddp.load_state_dict(checkpoint["model"], strict=True)
+        ema.load_state_dict(checkpoint["ema"], strict=True)
+        opt.load_state_dict(checkpoint["opt"])
+        train_steps = checkpoint["steps"]
+        start_epoch = int(train_steps / (len(dataset) / args.global_batch_size))
+        del checkpoint
+        logger.info(f"Resume training from checkpoint: {args.ckpt}")
+        logger.info(f"Initial state: steps={train_steps}, epochs={start_epoch}")
+    else:
+        update_ema(ema, model.module, decay=0)  # Ensure EMA is initialized with synced weights
     model.train()  # important! This enables embedding dropout for classifier-free guidance
     ema.eval()  # EMA model should always be in eval mode
 
-    # Variables for monitoring/logging purposes:
-    train_steps = 0
-    log_steps = 0
-    running_loss = 0
-    start_time = time()
 
     logger.info(f"Training for {args.epochs} epochs...")
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")
         for x, y in loader:
@@ -257,6 +271,7 @@ def main(args):
                         "model": model.module.state_dict(),
                         "ema": ema.state_dict(),
                         "opt": opt.state_dict(),
+                        "steps": train_steps,
                         "args": args
                     }
                     checkpoint_path = f"{checkpoint_dir}/{train_steps:07d}.pt"
@@ -286,5 +301,6 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--ckpt-every", type=int, default=50000)
+    parser.add_argument("--ckpt", type=str, default=None, help="ckpt path for resume training")
     args = parser.parse_args()
     main(args)
