@@ -202,7 +202,7 @@ def main(args):
             logger.info(f"Resume training from checkpoint: {args.ckpt}")
             logger.info(f"Initial state: steps={train_steps}, epochs={start_epoch}")
     else:
-        update_ema(ema, model.module, decay=0)  # Ensure EMA is initialized with synced weights
+        update_ema(ema, model, decay=0)  # Ensure EMA is initialized with synced weights
     model.train()  # important! This enables embedding dropout for classifier-free guidance
     ema.eval()  # EMA model should always be in eval mode
     model, opt, loader = accelerator.prepare(model, opt, loader)
